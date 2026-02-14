@@ -7,12 +7,15 @@ waits for results, and moves on.
 import uiautomator2 as u2
 import time
 import random
-import re
+import csv
+import os
 import logging
 from config import (
-    MAX_VIEWERS, POLL_INTERVAL, NO_GIVEAWAY_TIMEOUT,
-    GIVEAWAY_RESULT_TIMEOUT, ACTION_DELAY, ENTRY_DELAY,
-    TRANSITION_DELAY, CATEGORY,
+    MAX_VIEWERS_PACK, MAX_VIEWERS_OTHER,
+    MAX_WAIT_PACK, MAX_WAIT_OTHER,
+    ENDED_CHECKS_PACK, ENDED_CHECKS_OTHER,
+    POLL_INTERVAL, NO_GIVEAWAY_TIMEOUT,
+    ACTION_DELAY, ENTRY_DELAY, TRANSITION_DELAY, CATEGORY,
 )
 
 logging.basicConfig(
@@ -28,8 +31,8 @@ GIVEAWAY_CHECK_INTERVAL = (8, 13)
 # How long to wait after a giveaway ends to see if a new one starts (seconds)
 NEW_GIVEAWAY_WAIT = (15, 30)
 
-# Consecutive checks with no giveaway badge before we consider it truly ended
-ENDED_CONFIRM_CHECKS = 3
+# Log file for giveaway history
+LOG_FILE = os.path.join(os.path.dirname(__file__), "giveaway_log.csv")
 
 
 def rand(range_tuple):
@@ -49,6 +52,29 @@ class WhatnotBot:
         log.info(f"Connected: {self.d.info.get('productName', 'Unknown')}")
         self.giveaways_entered = 0
         self.streams_checked = 0
+        self._init_log()
+
+    def _init_log(self):
+        """Create CSV log file with headers if it doesn't exist."""
+        if not os.path.exists(LOG_FILE):
+            with open(LOG_FILE, "w", newline="") as f:
+                writer = csv.writer(f)
+                writer.writerow(["timestamp", "streamer", "is_pack", "wait_time", "viewers"])
+
+    def _log_giveaway(self, streamer, is_pack, wait_seconds, capped, viewers):
+        """Append a giveaway entry to the CSV log."""
+        wait_str = f"{int(wait_seconds)}+" if capped else str(int(wait_seconds))
+        pack_str = "pack" if is_pack else "other"
+        with open(LOG_FILE, "a", newline="") as f:
+            writer = csv.writer(f)
+            writer.writerow([
+                time.strftime("%Y-%m-%d %H:%M:%S"),
+                streamer,
+                pack_str,
+                wait_str,
+                viewers or "?",
+            ])
+        log.info(f"Logged: {streamer} | {pack_str} | {wait_str}s | {viewers or '?'} viewers")
 
     # ── Navigation ──
 
@@ -135,14 +161,36 @@ class WhatnotBot:
                 return desc
         return "unknown"
 
+    def check_is_pack_giveaway(self):
+        """
+        After tapping the Giveaway button, read the giveaway description
+        text to check if it contains 'pack'.
+        """
+        for node in self.d.xpath("//*").all():
+            info = node.info
+            text = info.get("text", "").lower()
+            bounds = info.get("bounds", {})
+            # Giveaway title/description is in the top area of the panel
+            if bounds.get("top", 0) < 400 and "pack" in text:
+                return True
+        return False
+
     def enter_giveaway(self):
-        """Open giveaway panel and tap the entry button."""
+        """
+        Open giveaway panel, check if it's a pack giveaway,
+        and tap the entry button.
+        Returns (entered: bool, is_pack: bool).
+        """
         giveaway_el = self.d(text="Giveaway")
         if not giveaway_el.exists:
-            return False
+            return False, False
 
         giveaway_el.click()
         sleep(ENTRY_DELAY)
+
+        # Check if it's a pack giveaway before entering
+        is_pack = self.check_is_pack_giveaway()
+        giveaway_type = "PACK" if is_pack else "other"
 
         entry_texts = [
             "Follow Host & Enter Giveaway",
@@ -154,21 +202,24 @@ class WhatnotBot:
             if btn.exists:
                 btn.click()
                 self.giveaways_entered += 1
-                log.info(f"ENTERED GIVEAWAY! (total: {self.giveaways_entered})")
+                log.info(f"ENTERED {giveaway_type} GIVEAWAY! (total: {self.giveaways_entered})")
                 sleep(ACTION_DELAY)
-                return True
+                return True, is_pack
 
         log.warning("No entry button found (maybe already entered?)")
-        return False
+        return False, is_pack
 
     def is_giveaway_still_active(self):
-        """Check if there's still an active giveaway badge on screen."""
         return self.d(text="Giveaway").exists or self.d(text="Entries").exists
 
     # ── Main logic ──
 
     def find_giveaway_stream(self):
-        """Scroll through streams quickly looking for one with an active giveaway."""
+        """
+        Scroll through streams looking for one with an active giveaway.
+        Applies viewer limits: enters any giveaway stream ≤50 viewers,
+        but will later filter non-pack giveaways by the stricter limit.
+        """
         max_scrolls = 30
 
         for i in range(max_scrolls):
@@ -181,81 +232,64 @@ class WhatnotBot:
                      f"{'GIVEAWAY!' if has_gw else 'no giveaway'}")
 
             if has_gw:
-                if viewers is not None and viewers > MAX_VIEWERS:
+                # Use the higher limit here — we'll check pack status after opening
+                if viewers is not None and viewers > MAX_VIEWERS_PACK:
                     log.info(f"Too many viewers ({viewers}), skipping...")
                     self.scroll_to_next_stream()
                     continue
 
                 log.info(f"Found giveaway stream: {name}")
-                return True
+                return True, viewers
 
             self.scroll_to_next_stream()
 
         log.info("Checked many streams, refreshing...")
-        return False
+        return False, None
 
-    def stay_for_giveaway(self):
+    def stay_for_giveaway(self, is_pack):
         """
-        Stay in the current stream until the giveaway fully runs its course.
-        Checks every ~10s if the giveaway is still active.
-        NEVER leaves while giveaway badge is showing.
-        Once it ends, waits briefly for a new one.
-        Returns when it's time to move on.
+        Stay in the current stream until the giveaway ends or max wait is hit.
+        Returns (wait_seconds, capped).
         """
+        max_wait = MAX_WAIT_PACK if is_pack else MAX_WAIT_OTHER
+        ended_checks = ENDED_CHECKS_PACK if is_pack else ENDED_CHECKS_OTHER
+        giveaway_type = "pack" if is_pack else "other"
         gone_count = 0
         start = time.time()
+        capped = False
 
-        # Phase 1: Wait for the current giveaway to finish
-        # No hard timeout — if giveaway is active, we stay no matter what
+        log.info(f"Staying for {giveaway_type} giveaway (max {max_wait // 60}min, "
+                 f"{ended_checks} confirm checks)...")
+
         while True:
             sleep(GIVEAWAY_CHECK_INTERVAL)
+            elapsed = time.time() - start
+
+            # Check max wait cap
+            if elapsed >= max_wait:
+                log.info(f"Max wait reached ({max_wait // 60}min), moving on.")
+                capped = True
+                break
 
             if self.is_giveaway_still_active():
                 gone_count = 0
-                elapsed = int(time.time() - start)
-                log.info(f"Giveaway still active... ({elapsed}s elapsed)")
+                log.info(f"Giveaway still active... ({int(elapsed)}s elapsed)")
             else:
                 gone_count += 1
-                log.info(f"Giveaway badge gone (check {gone_count}/{ENDED_CONFIRM_CHECKS})")
-                if gone_count >= ENDED_CONFIRM_CHECKS:
+                log.info(f"Giveaway badge gone (check {gone_count}/{ended_checks})")
+                if gone_count >= ended_checks:
                     log.info("Giveaway confirmed ended.")
                     break
 
-        # Phase 2: Giveaway ended — check viewers and wait for a new one
-        viewers = self.get_viewer_count()
-        name = self.get_streamer_name()
-        log.info(f"Giveaway over in {name}. Viewers: {viewers or '?'}")
-
-        if viewers is not None and viewers > MAX_VIEWERS:
-            log.info(f"Viewers too high ({viewers}), moving on.")
-            return
-
-        # Wait a bit to see if a new giveaway starts
-        log.info("Viewers still low, waiting to see if new giveaway starts...")
-        wait_time = rand(NEW_GIVEAWAY_WAIT)
-        wait_start = time.time()
-
-        while time.time() - wait_start < wait_time:
-            time.sleep(random.uniform(3, 6))
-
-            if self.has_giveaway():
-                log.info("Giveaway detected in this stream!")
-                entered = self.enter_giveaway()
-                if entered:
-                    # Stay for this new giveaway too
-                    self.stay_for_giveaway()
-                else:
-                    # Already entered (same giveaway still showing) — keep waiting
-                    log.info("Already entered, staying to wait it out...")
-                    self.stay_for_giveaway()
-                return
-
-        log.info("No new giveaway, moving on.")
+        wait_seconds = time.time() - start
+        return wait_seconds, capped
 
     def run(self):
         log.info("=" * 50)
         log.info("Whatnot Giveaway Bot Starting")
-        log.info(f"Max viewers: {MAX_VIEWERS} | Category: {CATEGORY}")
+        log.info(f"Pack: ≤{MAX_VIEWERS_PACK} viewers, {MAX_WAIT_PACK // 60}min max")
+        log.info(f"Other: ≤{MAX_VIEWERS_OTHER} viewers, {MAX_WAIT_OTHER // 60}min max")
+        log.info(f"Category: {CATEGORY}")
         log.info("=" * 50)
 
         try:
@@ -273,8 +307,7 @@ class WhatnotBot:
                 return
 
             while True:
-                # Scroll through streams looking for a giveaway
-                found = self.find_giveaway_stream()
+                found, viewers = self.find_giveaway_stream()
 
                 if not found:
                     self.leave_stream()
@@ -286,12 +319,53 @@ class WhatnotBot:
                         break
                     continue
 
-                # Found a giveaway stream — enter it
-                entered = self.enter_giveaway()
+                # Open giveaway panel and check type
+                entered, is_pack = self.enter_giveaway()
 
                 if entered:
-                    # STAY here until giveaway is done
-                    self.stay_for_giveaway()
+                    # Apply stricter viewer limit for non-pack giveaways
+                    if not is_pack and viewers is not None and viewers > MAX_VIEWERS_OTHER:
+                        log.info(f"Non-pack giveaway with {viewers} viewers (>{MAX_VIEWERS_OTHER}), skipping...")
+                        self.scroll_to_next_stream()
+                        log.info(f"Stats: {self.giveaways_entered} entered, "
+                                 f"{self.streams_checked} checked")
+                        continue
+
+                    streamer = self.get_streamer_name()
+
+                    # Stay for giveaway
+                    wait_seconds, capped = self.stay_for_giveaway(is_pack)
+
+                    # Log it
+                    current_viewers = self.get_viewer_count()
+                    self._log_giveaway(streamer, is_pack, wait_seconds, capped, current_viewers)
+
+                    # Check if we should stay for more
+                    max_viewers = MAX_VIEWERS_PACK if is_pack else MAX_VIEWERS_OTHER
+                    if current_viewers is not None and current_viewers <= max_viewers and not capped:
+                        log.info("Viewers still low, waiting for new giveaway...")
+                        wait_start = time.time()
+                        wait_time = rand(NEW_GIVEAWAY_WAIT)
+
+                        while time.time() - wait_start < wait_time:
+                            time.sleep(random.uniform(3, 6))
+
+                            if self.has_giveaway():
+                                log.info("Giveaway detected in this stream!")
+                                entered2, is_pack2 = self.enter_giveaway()
+                                if entered2:
+                                    wait2, capped2 = self.stay_for_giveaway(is_pack2)
+                                    self._log_giveaway(streamer, is_pack2, wait2, capped2,
+                                                       self.get_viewer_count())
+                                elif is_pack2 or self.is_giveaway_still_active():
+                                    # Already entered same giveaway, wait it out
+                                    log.info("Already entered, staying...")
+                                    wait2, capped2 = self.stay_for_giveaway(is_pack2)
+                                    self._log_giveaway(streamer, is_pack2, wait2, capped2,
+                                                       self.get_viewer_count())
+                                break
+
+                        log.info("Done with this stream.")
 
                 # Move to next stream
                 self.scroll_to_next_stream()
@@ -306,6 +380,7 @@ class WhatnotBot:
         finally:
             log.info(f"\nFinal: {self.giveaways_entered} giveaways entered, "
                      f"{self.streams_checked} streams checked")
+            log.info(f"Giveaway log saved to: {LOG_FILE}")
 
 
 if __name__ == "__main__":

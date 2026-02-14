@@ -1,31 +1,28 @@
 """Bot configuration."""
 
-# Maximum viewer count to consider a stream "low volume"
-MAX_VIEWERS = 50
+# ── Viewer limits ──
+# Pack giveaways: enter streams up to this many viewers
+MAX_VIEWERS_PACK = 50
+# Non-pack giveaways: only enter streams up to this many viewers
+MAX_VIEWERS_OTHER = 25
 
-# Poll interval range for UI checks (seconds) — randomized each cycle
+# ── Giveaway wait caps ──
+# Max time to wait for a pack giveaway to end (seconds)
+MAX_WAIT_PACK = 960       # 16 minutes
+# Max time to wait for a non-pack giveaway to end (seconds)
+MAX_WAIT_OTHER = 480      # 8 minutes
+
+# ── Ended confirmation ──
+# Consecutive badge-gone checks before confirming giveaway ended
+ENDED_CHECKS_PACK = 5
+ENDED_CHECKS_OTHER = 3
+
+# ── Timing ranges (randomized) ──
 POLL_INTERVAL = (3, 7)
-
-# How long to stay in a stream before leaving if no giveaway appears (seconds)
 NO_GIVEAWAY_TIMEOUT = (30, 60)
-
-# How long to wait after entering a giveaway for results (seconds)
-GIVEAWAY_RESULT_TIMEOUT = (180, 360)
-
-# Delay range between major actions like taps/navigations (seconds)
 ACTION_DELAY = (1.0, 3.0)
-
-# Delay range before entering a giveaway after detecting it (seconds)
 ENTRY_DELAY = (1.5, 4.0)
-
-# Delay range after leaving a stream before finding the next one (seconds)
 TRANSITION_DELAY = (2.0, 5.0)
 
-# Category to search in
+# ── Category ──
 CATEGORY = "Pokémon Cards"
-
-# Keywords in stream titles that suggest giveaways
-GIVEAWAY_KEYWORDS = [
-    "giveaway", "givvy", "givvys", "givvies", "giv",
-    "free", "raffle", "give away", "give-away",
-]
