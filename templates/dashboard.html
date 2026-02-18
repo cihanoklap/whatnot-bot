@@ -1,0 +1,347 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Whatnot Bot</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, monospace;
+    background: #1a1a2e; color: #e0e0e0; min-height: 100vh;
+  }
+  header {
+    background: #16213e; padding: 16px 24px; display: flex;
+    align-items: center; justify-content: space-between; border-bottom: 1px solid #0f3460;
+  }
+  header h1 { font-size: 22px; color: #e94560; }
+  .status-dot {
+    width: 12px; height: 12px; border-radius: 50%; display: inline-block;
+    margin-right: 8px; vertical-align: middle;
+  }
+  .status-dot.running { background: #00c853; box-shadow: 0 0 8px #00c853; }
+  .status-dot.stopped { background: #e94560; }
+  .status-text { font-size: 14px; vertical-align: middle; }
+
+  .container { max-width: 960px; margin: 0 auto; padding: 20px; }
+
+  /* Control bar */
+  .control-bar {
+    display: flex; align-items: center; gap: 12px;
+    background: #16213e; border-radius: 8px; padding: 16px; margin-bottom: 16px;
+  }
+  button {
+    padding: 10px 24px; border: none; border-radius: 6px; cursor: pointer;
+    font-size: 14px; font-weight: 600; transition: opacity 0.2s;
+  }
+  button:disabled { opacity: 0.4; cursor: not-allowed; }
+  .btn-start { background: #00c853; color: #111; }
+  .btn-stop { background: #e94560; color: #fff; }
+  .btn-save { background: #0f3460; color: #e0e0e0; }
+  .btn-save:hover:not(:disabled) { background: #1a4a8a; }
+
+  /* Mode selector */
+  .mode-panel {
+    background: #16213e; border-radius: 8px; padding: 16px; margin-bottom: 16px;
+  }
+  .mode-panel h3 { margin-bottom: 10px; font-size: 14px; color: #888; text-transform: uppercase; }
+  .mode-options { display: flex; gap: 16px; }
+  .mode-options label {
+    display: flex; align-items: center; gap: 6px; cursor: pointer; font-size: 14px;
+  }
+  .mode-options input[type="radio"] { accent-color: #e94560; }
+
+  /* Config panel */
+  .config-panel {
+    background: #16213e; border-radius: 8px; padding: 16px; margin-bottom: 16px;
+  }
+  .config-panel h3 { margin-bottom: 12px; font-size: 14px; color: #888; text-transform: uppercase; }
+  .config-grid {
+    display: grid; grid-template-columns: 1fr 1fr; gap: 12px;
+  }
+  .config-field label {
+    display: block; font-size: 12px; color: #888; margin-bottom: 4px;
+  }
+  .config-field input {
+    width: 100%; padding: 8px 10px; background: #0f3460; border: 1px solid #1a4a8a;
+    border-radius: 4px; color: #e0e0e0; font-size: 14px;
+  }
+  .config-field input:disabled { opacity: 0.5; }
+  .config-actions { grid-column: 1 / -1; display: flex; justify-content: flex-end; margin-top: 4px; }
+
+  /* Stats bar */
+  .stats-bar {
+    display: flex; gap: 24px; background: #16213e; border-radius: 8px;
+    padding: 16px; margin-bottom: 16px;
+  }
+  .stat { text-align: center; }
+  .stat .value { font-size: 28px; font-weight: 700; color: #e94560; }
+  .stat .label { font-size: 12px; color: #888; text-transform: uppercase; }
+
+  /* Log area */
+  .log-panel {
+    background: #0d1117; border: 1px solid #1a4a8a; border-radius: 8px;
+    padding: 12px; height: 400px; overflow-y: auto; font-family: 'Courier New', monospace;
+    font-size: 13px; line-height: 1.5;
+  }
+  .log-panel .line { white-space: pre-wrap; word-break: break-all; }
+  .log-panel .line.error { color: #e94560; }
+  .log-panel .line.warning { color: #ffc107; }
+  .log-panel .line.info { color: #b0b0b0; }
+
+  .error-toast {
+    position: fixed; bottom: 20px; right: 20px; background: #e94560;
+    color: #fff; padding: 12px 20px; border-radius: 6px; font-size: 14px;
+    display: none; z-index: 999;
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>Whatnot Bot</h1>
+  <div>
+    <span class="status-dot stopped" id="statusDot"></span>
+    <span class="status-text" id="statusText">Stopped</span>
+  </div>
+</header>
+
+<div class="container">
+  <!-- Control bar -->
+  <div class="control-bar">
+    <button class="btn-start" id="btnStart" onclick="startBot()">Start</button>
+    <button class="btn-stop" id="btnStop" onclick="stopBot()" disabled>Stop</button>
+  </div>
+
+  <!-- Mode selector -->
+  <div class="mode-panel">
+    <h3>Mode</h3>
+    <div class="mode-options">
+      <label>
+        <input type="radio" name="mode" value="normal" checked id="modeNormal">
+        Normal (N&amp;N + Followed Hosts)
+      </label>
+      <label>
+        <input type="radio" name="mode" value="lowest_viewer" id="modeLowest">
+        Lowest Viewer (sort by viewer count)
+      </label>
+    </div>
+  </div>
+
+  <!-- Config panel -->
+  <div class="config-panel">
+    <h3>Configuration</h3>
+    <div class="config-grid">
+      <div class="config-field">
+        <label>Max Viewers (Pack)</label>
+        <input type="number" id="cfgMaxViewersPack" min="1">
+      </div>
+      <div class="config-field">
+        <label>Max Viewers (Other)</label>
+        <input type="number" id="cfgMaxViewersOther" min="1">
+      </div>
+      <div class="config-field">
+        <label>Max Wait Pack (minutes)</label>
+        <input type="number" id="cfgMaxWaitPack" min="1">
+      </div>
+      <div class="config-field">
+        <label>Max Wait Other (minutes)</label>
+        <input type="number" id="cfgMaxWaitOther" min="1">
+      </div>
+      <div class="config-field">
+        <label>Ended Checks (Pack)</label>
+        <input type="number" id="cfgEndedChecksPack" min="1">
+      </div>
+      <div class="config-field">
+        <label>Ended Checks (Other)</label>
+        <input type="number" id="cfgEndedChecksOther" min="1">
+      </div>
+      <div class="config-actions">
+        <button class="btn-save" id="btnSave" onclick="saveConfig()">Save</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Stats -->
+  <div class="stats-bar">
+    <div class="stat">
+      <div class="value" id="statGiveaways">0</div>
+      <div class="label">Giveaways Entered</div>
+    </div>
+    <div class="stat">
+      <div class="value" id="statStreams">0</div>
+      <div class="label">Streams Checked</div>
+    </div>
+  </div>
+
+  <!-- Logs -->
+  <div class="log-panel" id="logPanel"></div>
+</div>
+
+<div class="error-toast" id="errorToast"></div>
+
+<script>
+  let isRunning = false;
+  let eventSource = null;
+
+  // ── Helpers ──
+  function showError(msg) {
+    const t = document.getElementById('errorToast');
+    t.textContent = msg;
+    t.style.display = 'block';
+    setTimeout(() => t.style.display = 'none', 4000);
+  }
+
+  function setRunning(running) {
+    isRunning = running;
+    const dot = document.getElementById('statusDot');
+    const txt = document.getElementById('statusText');
+    dot.className = 'status-dot ' + (running ? 'running' : 'stopped');
+    txt.textContent = running ? 'Running' : 'Stopped';
+    document.getElementById('btnStart').disabled = running;
+    document.getElementById('btnStop').disabled = !running;
+    document.getElementById('btnSave').disabled = running;
+
+    // Disable mode + config inputs while running
+    document.querySelectorAll('.config-field input, .mode-options input').forEach(el => {
+      el.disabled = running;
+    });
+  }
+
+  // ── Config ──
+  async function loadConfig() {
+    try {
+      const res = await fetch('/api/config');
+      const cfg = await res.json();
+      document.getElementById('cfgMaxViewersPack').value = cfg.max_viewers_pack;
+      document.getElementById('cfgMaxViewersOther').value = cfg.max_viewers_other;
+      document.getElementById('cfgMaxWaitPack').value = Math.round(cfg.max_wait_pack / 60);
+      document.getElementById('cfgMaxWaitOther').value = Math.round(cfg.max_wait_other / 60);
+      document.getElementById('cfgEndedChecksPack').value = cfg.ended_checks_pack;
+      document.getElementById('cfgEndedChecksOther').value = cfg.ended_checks_other;
+      if (cfg.mode === 'lowest_viewer') {
+        document.getElementById('modeLowest').checked = true;
+      } else {
+        document.getElementById('modeNormal').checked = true;
+      }
+    } catch (e) {
+      showError('Failed to load config');
+    }
+  }
+
+  async function saveConfig() {
+    const mode = document.querySelector('input[name="mode"]:checked').value;
+    const payload = {
+      mode: mode,
+      max_viewers_pack: parseInt(document.getElementById('cfgMaxViewersPack').value),
+      max_viewers_other: parseInt(document.getElementById('cfgMaxViewersOther').value),
+      max_wait_pack: parseInt(document.getElementById('cfgMaxWaitPack').value) * 60,
+      max_wait_other: parseInt(document.getElementById('cfgMaxWaitOther').value) * 60,
+      ended_checks_pack: parseInt(document.getElementById('cfgEndedChecksPack').value),
+      ended_checks_other: parseInt(document.getElementById('cfgEndedChecksOther').value),
+    };
+    try {
+      const res = await fetch('/api/config', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      if (!res.ok) {
+        const data = await res.json();
+        showError(data.error || 'Save failed');
+      }
+    } catch (e) {
+      showError('Failed to save config');
+    }
+  }
+
+  // ── Bot control ──
+  async function startBot() {
+    // Save config first (includes mode)
+    await saveConfig();
+    try {
+      const res = await fetch('/api/start', { method: 'POST' });
+      const data = await res.json();
+      if (!res.ok) {
+        showError(data.error || 'Start failed');
+        return;
+      }
+      setRunning(true);
+      connectSSE();
+    } catch (e) {
+      showError('Failed to start bot');
+    }
+  }
+
+  async function stopBot() {
+    try {
+      document.getElementById('btnStop').disabled = true;
+      const res = await fetch('/api/stop', { method: 'POST' });
+      const data = await res.json();
+      if (!res.ok) {
+        showError(data.error || 'Stop failed');
+      }
+      setRunning(false);
+      disconnectSSE();
+    } catch (e) {
+      showError('Failed to stop bot');
+    }
+  }
+
+  // ── SSE log streaming ──
+  function connectSSE() {
+    disconnectSSE();
+    document.getElementById('logPanel').innerHTML = '';
+    eventSource = new EventSource('/api/logs');
+    eventSource.onmessage = function(e) {
+      const line = JSON.parse(e.data);
+      appendLog(line);
+    };
+    eventSource.onerror = function() {
+      // Will auto-reconnect
+    };
+  }
+
+  function disconnectSSE() {
+    if (eventSource) {
+      eventSource.close();
+      eventSource = null;
+    }
+  }
+
+  function appendLog(text) {
+    const panel = document.getElementById('logPanel');
+    const div = document.createElement('div');
+    div.className = 'line';
+    if (text.includes('[ERROR]')) div.className += ' error';
+    else if (text.includes('[WARNING]')) div.className += ' warning';
+    else div.className += ' info';
+    div.textContent = text;
+    panel.appendChild(div);
+    // Auto-scroll if near bottom
+    if (panel.scrollHeight - panel.scrollTop - panel.clientHeight < 80) {
+      panel.scrollTop = panel.scrollHeight;
+    }
+  }
+
+  // ── Status polling ──
+  async function pollStatus() {
+    try {
+      const res = await fetch('/api/status');
+      const data = await res.json();
+      setRunning(data.running);
+      document.getElementById('statGiveaways').textContent = data.giveaways_entered;
+      document.getElementById('statStreams').textContent = data.streams_checked;
+      // Auto-connect SSE if bot is running but we're not connected
+      if (data.running && !eventSource) connectSSE();
+      if (!data.running && eventSource) disconnectSSE();
+    } catch (e) { /* ignore */ }
+  }
+
+  // ── Init ──
+  loadConfig();
+  pollStatus();
+  setInterval(pollStatus, 5000);
+</script>
+</body>
+</html>

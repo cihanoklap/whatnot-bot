@@ -1,3 +1,4 @@
 uiautomator2
 opencv-python
 Pillow
+flask
